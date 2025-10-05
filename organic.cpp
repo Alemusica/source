@@ -870,7 +870,9 @@ private:
     inline double pull_ola(){ double y = undenorm(olaring[ola_rd]); olaring[ola_rd] = 0.0; ola_rd = (ola_rd+1) % (int)olaring.size(); return y; }
 };
 
-MIN_EXTERNAL(organic_noise_tilde, "organic.noise~");
+extern "C" void ext_main(void* r) {
+    c74::min::wrap_as_max_external<organic_noise_tilde>("organic_noise_tilde", "organic.noise~", r);
+}
 
 /*
 README (inline)
