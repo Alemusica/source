@@ -489,6 +489,7 @@ public:
         // STFT/OLA
         dft = TinyDFT(128, 64); // H=N/2
         hop_count = 0; need_reloc = true;
+        smr_peak_hold = 0.0;
         active_config.prepare(m_sr);
         shadow_config.prepare(m_sr);
 
@@ -726,6 +727,10 @@ public:
 
                 // IFFT + OLA (H=N/2)
                 dft.idft(active_config.re, active_config.im, active_config.yframe);
+                double frame_peak = 0.0;
+                for (double v : active_config.yframe)
+                    frame_peak = std::max(frame_peak, std::fabs(v));
+                smr_peak_hold = frame_peak;
                 add_ola(active_config.yframe);
             }
 
@@ -733,7 +738,11 @@ public:
             if(use_smr){
                 double wet = pull_ola();
                 if(!std::isfinite(wet)) wet = 0.0;
-                wet_smr = (std::fabs(wet) > 1e-12) ? wet : wet_core;
+                if (smr_peak_hold < k_smr_silence_floor)
+                    wet_smr = wet_core;
+                else
+                    wet_smr = wet;
+                smr_peak_hold *= 0.9995;
             }
 
             // Blend dry/wet globale
@@ -829,6 +838,7 @@ private:
 
     // core state
     double phase_emdr {0.0}; double lfo_glitch {0.0}; double gstate {0.0}; double breathe_phase {0.0}; double tp_lin {1.0}; double lim_rel_a {0.0}; double lim_ga {1.0};
+    double smr_peak_hold {0.0};
 
     // STFT/OLA
     TinyDFT dft {128,64};
@@ -894,6 +904,8 @@ private:
     inline void copy_recent_to_frame(std::vector<double>& dst){ int N=dft.N; int idx = in_wr - N; if(idx<0) idx += (int)inring.size(); for(int n=0;n<N;n++){ dst[n]=inring[(idx+n) % (int)inring.size()]; } }
     inline void add_ola(const std::vector<double>& frm){ int Nloc=(int)frm.size(); int H=dft.H; for(int n=0;n<Nloc;n++){ int pos = (ola_wr + n) % (int)olaring.size(); olaring[pos] += frm[n]; } ola_wr = (ola_wr + H) % (int)olaring.size(); }
     inline double pull_ola(){ double y = undenorm(olaring[ola_rd]); olaring[ola_rd] = 0.0; ola_rd = (ola_rd+1) % (int)olaring.size(); return y; }
+
+    static constexpr double k_smr_silence_floor = 1.0e-5;
 };
 
 extern "C" void ext_main(void* r) {
