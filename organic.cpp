@@ -11,10 +11,11 @@
 #include <algorithm>
 #include <limits>
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
+#include <atomic>
 
 using namespace c74::min;
 
-static constexpr double PI  = 3.14159265358979323846;
+static constexpr double kPi  = 3.14159265358979323846;
 static constexpr double PHI = 1.6180339887498948482;
 
 //--------------------- Utility RNG ---------------------//
@@ -39,12 +40,26 @@ inline static double undenorm(double x){ return (std::fabs(x) < 1e-30) ? 0.0 : x
 
 //--------------------- Simple filters ---------------------//
 struct OnePole { double a{0.0}, b{1.0}, z{0.0};
-    void set_lp(double cutoff, double sr) { cutoff = std::max(0.1, cutoff); double p = std::exp(-2.0 * PI * cutoff / sr); a = 1.0 - p; b = p; }
+    void set_lp(double cutoff, double sr) { cutoff = std::max(0.1, cutoff); double p = std::exp(-2.0 * kPi * cutoff / sr); a = 1.0 - p; b = p; }
     inline double process(double x){ z = a*x + b*z; return z; }
 };
 
 struct DCBlock { double R{0.995}, x1{0.0}, y1{0.0};
     inline double process(double x){ double y = x - x1 + R*y1; x1=x; y1=y; return undenorm(y); }
+};
+
+struct ParamSmoother {
+    double z{0.0};
+    double a{0.0};
+    void setup(double ms, double sr) {
+        double tau = std::max(1.0, (ms / 1000.0) * sr);
+        a = std::exp(-1.0 / tau);
+        z = 0.0;
+    }
+    double process(double target) {
+        z = a * z + (1.0 - a) * target;
+        return z;
+    }
 };
 
 //--------------------- Pink noise (Voss-McCartney) ---------------------//
@@ -78,7 +93,7 @@ struct OU {
     inline void set(double thz, double sig, double srr){ theta=std::max(0.0001,thz); sigma=sig; sr=srr; }
     inline double process(){
         double dt=1.0/sr; double u1=std::max(1e-12,rng.next()); double u2=rng.next();
-        double g=std::sqrt(-2.0*std::log(u1))*std::cos(2*PI*u2);
+        double g=std::sqrt(-2.0*std::log(u1))*std::cos(2*kPi*u2);
         x += theta*(0.0-x)*dt + sigma*std::sqrt(dt)*g;
         if(x>1.5)x=1.5; if(x<-1.5)x=-1.5; return std::tanh(x);
     }
@@ -128,14 +143,14 @@ struct TinyDFT {
     TinyDFT(int n=128, int h=64):N(n),H(h){
         win.resize(N);
         for(int n_=0;n_<N;n_++){
-            double w = 0.5 - 0.5*std::cos(2.0*PI*(double)n_/N);
+            double w = 0.5 - 0.5*std::cos(2.0*kPi*(double)n_/N);
             win[n_] = std::sqrt(w + 1e-12); // sqrt-Hann
         }
         // precompute twiddles
         coskn.resize(N*N); sinkn.resize(N*N);
         for(int k=0;k<N;k++){
             for(int n_=0;n_<N;n_++){
-                double ang = 2.0*PI*(double)k*(double)n_/(double)N;
+                double ang = 2.0*kPi*(double)k*(double)n_/(double)N;
                 coskn[k*N + n_] = std::cos(ang);
                 sinkn[k*N + n_] = std::sin(ang);
             }
@@ -286,7 +301,7 @@ struct BiquadFilter {
     double b0{1.0},b1{0.0},b2{0.0},a1{0.0},a2{0.0};
     double x1{0.0},x2{0.0},y1{0.0},y2{0.0};
     void set_shelving(double fc, double gain_db, double sr) {
-        double w0 = 2.0*PI*fc/sr;
+        double w0 = 2.0*kPi*fc/sr;
         double A = std::pow(10.0, gain_db/40.0);
         double alpha = std::sin(w0)/2.0 * std::sqrt((A + 1.0/A)*(1.0/0.707 - 1.0) + 2.0);
         double two_sqrtA_alpha = 2.0*std::sqrt(A)*alpha;
@@ -423,11 +438,8 @@ public:
         // STFT/OLA
         dft = TinyDFT(128, 64); // H=N/2
         hop_count = 0; need_reloc = true;
-        winbuf.assign(dft.N,0.0);
-        re.assign(dft.N,0.0); im.assign(dft.N,0.0);
-        yframe.assign(dft.N,0.0);
-        mag.assign(dft.N,0.0); phase.assign(dft.N,0.0);
-        gr_re.assign(dft.N,0.0); gr_im.assign(dft.N,0.0);
+        active_config.prepare(m_sr);
+        shadow_config.prepare(m_sr);
 
         inring.assign(4096, 0.0); in_wr=0;
         olaring.assign(4096, 0.0); ola_rd=0; ola_wr=0;
@@ -437,24 +449,33 @@ public:
         assert(olaring.size() >= (size_t)(4 * dft.N));
 #endif
 
-        // scratch prealloc
-        xw.resize(dft.N);
-        Xmag.resize(dft.N); Gmag.resize(dft.N); B.resize(dft.N);
+        active_config.yin.thresh = yin_thresh;
+        shadow_config.yin.thresh = yin_thresh;
+        active_config.yin.prepare(dft.N);
+        shadow_config.yin.prepare(dft.N);
 
-        yin.thresh = yin_thresh; yin.prepare(dft.N);
-        ot.prepare(dft.N);
+        active_config.ot.prepare(dft.N);
+        shadow_config.ot.prepare(dft.N);
 
         // HARMONIA
         breathe_phase=0.0;
         tp_lin = std::pow(10.0, (double)tp_ceiling / 20.0);
         double rel_ms = 80.0; lim_rel_a = std::exp(-1.0 / (((rel_ms/1000.0)*m_sr) + 1e-9));
         lim_ga = 1.0;
-        cf_lpL.set_lp(cf_cutoff, m_sr);
-        cf_lpR.set_lp(cf_cutoff, m_sr);
+        active_config.cf_lpL.set_lp(cf_cutoff, m_sr);
+        active_config.cf_lpR.set_lp(cf_cutoff, m_sr);
+        shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
+        shadow_config.cf_lpR.set_lp(cf_cutoff, m_sr);
+
+        alpha_smooth.setup(10.0, m_sr);
+        grain_smooth.setup(10.0, m_sr);
+        ot_smooth.setup(10.0, m_sr);
+        gain_smoother.setup(50.0, m_sr);
 
         // Poisson & FDN
         npp.setup(m_sr, (uint32_t)seed ^ 0xDEADBEEFu);
-        fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
+        active_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
+        shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
 
         // grain scheduling
         grain_count = 0;
@@ -464,35 +485,27 @@ public:
         return {};
     } };
 
-    // setters per derived
-    attribute<number>::setter lambda_setters = [this](number v){
-        if(m_sr>0){
-            shadow_config = active_config;  // Copy current
-            shadow_config.prepare(m_sr);    // Update shadow
-            config_dirty = true;            // Signal swap needed
-        }
-        return v;
-    };
-
     organic_noise_tilde(){
-        mix.set_setter(lambda_setters); color.set_setter(lambda_setters); fbm_depth.set_setter(lambda_setters);
-        ou_rate.set_setter(lambda_setters); ou_sigma.set_setter(lambda_setters); chaos.set_setter(lambda_setters;
-        glitch_rate.set_setter(lambda_setters); glitch_depth.set_setter(lambda_setters); env_sense.set_setter(lambda_setters);
-        emdr_rate.set_setter(lambda_setters); emdr_depth.set_setter(lambda_setters); seed.set_setter(lambda_setters);
+        auto setter = [this](number v){ return this->propagate_config_change(v); };
 
-        smr_alpha.set_setter(lambda_setters); grain_width.set_setter(lambda_setters); grain_rate.set_setter(lambda_setters);
-        harmonicity.set_setter(lambda_setters); gate_thresh.set_setter(lambda_setters); phi_dither.set_setter(lambda_setters);
+        mix.set_setter(setter); color.set_setter(setter); fbm_depth.set_setter(setter);
+        ou_rate.set_setter(setter); ou_sigma.set_setter(setter); chaos.set_setter(setter);
+        glitch_rate.set_setter(setter); glitch_depth.set_setter(setter); env_sense.set_setter(setter);
+        emdr_rate.set_setter(setter); emdr_depth.set_setter(setter); seed.set_setter(setter);
 
-        harmonia.set_setter(lambda_setters); breathe_rate.set_setter(lambda_setters); breathe_depth.set_setter(lambda_setters);
-        crossfeed.set_setter(lambda_setters); cf_cutoff.set_setter(lambda_setters); tp_ceiling.set_setter(lambda_setters);
+        smr_alpha.set_setter(setter); grain_width.set_setter(setter); grain_rate.set_setter(setter);
+        harmonicity.set_setter(setter); gate_thresh.set_setter(setter); phi_dither.set_setter(setter);
 
-        beta_1f.set_setter(lambda_setters); beta_mix.set_setter(lambda_setters);
-        poisson_base.set_setter(lambda_setters); poisson_envamt.set_setter(lambda_setters);
-        ot_enable.set_setter(lambda_setters); ot_tau.set_setter(lambda_setters);
-        yin_enable.set_setter(lambda_setters); yin_thresh.set_setter(lambda_setters);
+        harmonia.set_setter(setter); breathe_rate.set_setter(setter); breathe_depth.set_setter(setter);
+        crossfeed.set_setter(setter); cf_cutoff.set_setter(setter); tp_ceiling.set_setter(setter);
+
+        beta_1f.set_setter(setter); beta_mix.set_setter(setter);
+        poisson_base.set_setter(setter); poisson_envamt.set_setter(setter);
+        ot_enable.set_setter(setter); ot_tau.set_setter(setter);
+        yin_enable.set_setter(setter); yin_thresh.set_setter(setter);
     }
 
-    void operator()(audio_bundle_input& in, audio_bundle_output& out) {
+    void operator()(audio_bundle in, audio_bundle out) {
         const double* in1p = in.samples(0); double* L = out.samples(0); double* R = out.samples(1); auto vs = in.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
@@ -506,7 +519,7 @@ public:
             // ---------- Respirazione HARMONIA ----------
             breathe_phase += std::max(0.0001, (double)breathe_rate) * inv_sr;
             if(breathe_phase>=1.0) breathe_phase-=1.0;
-            const double breath = 0.5 - 0.5*std::cos(2.0*PI*breathe_phase); // [0..1]
+            const double breath = 0.5 - 0.5*std::cos(2.0*kPi*breathe_phase); // [0..1]
             const double d_breath = (double)breathe_depth;
 
             // ---------- CORE time-domain ----------
@@ -561,11 +574,14 @@ public:
                 const double local_ot_tau = ot_smooth.process(ot_tau);
 
                 // copia frame
-                copy_recent_to_frame(winbuf);
+                copy_recent_to_frame(active_config.winbuf);
 
                 // DFT
-                dft.dft(winbuf, re, im);
-                for(int k=0;k<dft.N;k++){ mag[k]=std::hypot(re[k], im[k]); phase[k]=std::atan2(im[k], re[k]); }
+                dft.dft(active_config.winbuf, active_config.re, active_config.im);
+                for(int k=0;k<dft.N;k++){
+                    active_config.mag[k]=std::hypot(active_config.re[k], active_config.im[k]);
+                    active_config.phase[k]=std::atan2(active_config.im[k], active_config.re[k]);
+                }
 
                 // α modulato dal respiro
                 const double wob = (harmonia>0.5) ? (0.15 * d_breath * (breath - 0.5)) : 0.0;  // ±7.5%
@@ -576,16 +592,17 @@ public:
                 double f0_bin = 2.0;
                 if (yin_enable > 0.5) {
                     // Use longer window for YIN
-                    dft.copy_long_window(inring, in_wr, yin_long_win, 2); // Stride=2 for basic decimation
+                    dft.copy_long_window(inring, in_wr, active_config.yin_long_win, 2); // Stride=2 for basic decimation
                     double mean = 0.0;
-                    for(double v : yin_long_win) mean += v;
-                    mean /= (double)yin_long_win.size();
-                    for(size_t n=0; n<yin_long_win.size(); ++n) xw[n] = yin_long_win[n] - mean;
-                    double tau = yin.estimate_tau(xw);
-                    if (!(tau >= 2.0 && tau < yin_long_win.size()/2)) tau = 2.0;
+                    for(double v : active_config.yin_long_win) mean += v;
+                    mean /= (double)active_config.yin_long_win.size();
+                    for(size_t n=0; n<active_config.yin_long_win.size(); ++n)
+                        active_config.xw[n] = active_config.yin_long_win[n] - mean;
+                    double tau = active_config.yin.estimate_tau(active_config.xw);
+                    if (!(tau >= 2.0 && tau < active_config.yin_long_win.size()/2)) tau = 2.0;
                     f0_bin = ((double)dft.N * m_sr) / (tau * 2.0 * 48000.0); // Adjust for decimation
                 } else {
-                    int kmax=2; double vmax=0.0; for(int k=2;k<dft.N/8;k++){ if(mag[k]>vmax){ vmax=mag[k]; kmax=k; } } f0_bin = std::max(2, kmax);
+                    int kmax=2; double vmax=0.0; for(int k=2;k<dft.N/8;k++){ if(active_config.mag[k]>vmax){ vmax=active_config.mag[k]; kmax=k; } } f0_bin = std::max(2, kmax);
                 }
                 // Median(3)
                 f0_hist[f0_idx] = f0_bin; f0_idx = (f0_idx+1) % 3;
@@ -596,8 +613,8 @@ public:
                 f0_bin = std::clamp(f0_med, 2.0, (double)dft.N/2);
 
                 // costruiamo GRANO spettrale
-                std::fill(gr_re.begin(), gr_re.end(), 0.0);
-                std::fill(gr_im.begin(), gr_im.end(), 0.0);
+                std::fill(active_config.gr_re.begin(), active_config.gr_re.end(), 0.0);
+                std::fill(active_config.gr_im.begin(), active_config.gr_im.end(), 0.0);
 
                 for(int n=1;n<=10;n++){
                     double kn = f0_bin * n * std::sqrt(1.0 + b_inh*n*n);
@@ -610,8 +627,8 @@ public:
                     for(int k=k0;k<=k1;k++){
                         double w = std::exp(-0.5 * ((k-center)*(k-center)) / (sigma*sigma));
                         double m = amp * w;
-                        gr_re[k] += m * std::cos(phase[k]);
-                        gr_im[k] += m * std::sin(phase[k]);
+                        active_config.gr_re[k] += m * std::cos(active_config.phase[k]);
+                        active_config.gr_im[k] += m * std::sin(active_config.phase[k]);
                     }
                 }
                 need_reloc = false;
@@ -619,44 +636,48 @@ public:
                 // cleaning dolce
                 const double tgh = gate_thresh;
                 for(int k=0;k<dft.N;k++){
-                    double ref = mag[k] + 1e-12;
+                    double ref = active_config.mag[k] + 1e-12;
                     double nrm = std::tanh(2.0*std::sqrt(ref));
                     double g = (nrm<=tgh) ? 0.2 * (nrm/tgh)
                                           : ([&](){ double u = (nrm - tgh) / std::max(1e-6, (1.0 - tgh)); u=clamp01(u); return u*u*(3.0 - 2.0*u); })();
-                    gr_re[k]*=g; gr_im[k]*=g;
+                    active_config.gr_re[k]*=g; active_config.gr_im[k]*=g;
                 }
 
                 // OT barycenter (1D) tra |X| e |G| (massa conservata)
                 if(ot_enable>0.5) {
                     double sumX = 0.0, sumG = 0.0;
                     for(int k=0; k<dft.N; k++) {
-                        sumX += mag[k];
-                        sumG += std::hypot(gr_re[k], gr_im[k]);
+                        active_config.Xmag[k] = active_config.mag[k];
+                        double gk = std::hypot(active_config.gr_re[k], active_config.gr_im[k]);
+                        active_config.Gmag[k] = gk;
+                        sumX += active_config.Xmag[k];
+                        sumG += gk;
                     }
                     double S = gain_smoother.process((1.0 - local_alpha)*sumX + local_alpha*sumG);
-                    
-                    ot.barycenter_push(Xmag, Gmag, B, clamp01((double)ot_tau));
-                    
+
+                    active_config.ot.barycenter_push(active_config.Xmag, active_config.Gmag,
+                                                     active_config.B, clamp01((double)local_ot_tau));
+
                     for(int k=0; k<dft.N; k++) {
-                        double r2 = re[k]*re[k] + im[k]*im[k];
+                        double r2 = active_config.re[k]*active_config.re[k] + active_config.im[k]*active_config.im[k];
                         double invmag = (r2 > 1e-24) ? 1.0/std::sqrt(r2) : 0.0;
-                        double u_re = re[k] * invmag;
-                        double u_im = im[k] * invmag;
-                        double mB = S * B[k];
-                        gr_re[k] = mB * u_re;
-                        gr_im[k] = mB * u_im;
+                        double u_re = active_config.re[k] * invmag;
+                        double u_im = active_config.im[k] * invmag;
+                        double mB   = S * active_config.B[k];
+                        active_config.gr_re[k] = mB * u_re;
+                        active_config.gr_im[k] = mB * u_im;
                     }
                 }
 
                 // Blend complesso
                 for(int k=0;k<dft.N;k++){
-                    re[k] = (1.0-local_alpha)*re[k] + local_alpha*gr_re[k];
-                    im[k] = (1.0-local_alpha)*im[k] + local_alpha*gr_im[k];
+                    active_config.re[k] = (1.0-local_alpha)*active_config.re[k] + local_alpha*active_config.gr_re[k];
+                    active_config.im[k] = (1.0-local_alpha)*active_config.im[k] + local_alpha*active_config.gr_im[k];
                 }
 
                 // IFFT + OLA (H=N/2)
-                dft.idft(re, im, yframe);
-                add_ola(yframe);
+                dft.idft(active_config.re, active_config.im, active_config.yframe);
+                add_ola(active_config.yframe);
             }
 
             // pull OLA ad ogni sample (solo se smr)
@@ -671,7 +692,7 @@ public:
 
             // micro-FDN "nuvola" (mix basso)
             const double fdn_send = 0.08;
-            double y_fdn = fdn.tick(y);
+            double y_fdn = active_config.fdn.tick(y);
             y = mix_lin(y, y_fdn, fdn_send);
 
             // EMDR L/R (range rilassante, senza scrivere attributi in audio thread)
@@ -725,6 +746,20 @@ public:
     }
 
 private:
+    number propagate_config_change(number v) {
+        if (m_sr > 0) {
+            shadow_config = active_config;
+            shadow_config.prepare(m_sr);
+            shadow_config.yin.thresh = yin_thresh;
+            shadow_config.yin.prepare(dft.N);
+            shadow_config.ot.prepare(dft.N);
+            shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
+            shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
+            shadow_config.cf_lpR.set_lp(cf_cutoff, m_sr);
+            config_dirty.store(true, std::memory_order_release);
+        }
+        return v;
+    }
     // state
     double m_sr {48000.0}; double inv_sr {1.0/48000.0};
 
@@ -765,7 +800,7 @@ private:
             yframe.assign(N,0.0);
             mag.assign(N,0.0); phase.assign(N,0.0);
             gr_re.assign(N,0.0); gr_im.assign(N,0.0);
-            xw.resize(N);
+            xw.resize(yin_long_win.size());
             Xmag.resize(N); Gmag.resize(N); B.resize(N);
             
             // Setup components
@@ -778,7 +813,13 @@ private:
     std::atomic<bool> config_dirty{false};
     Config active_config;
     Config shadow_config;
-    ParamSmoother alpha_smooth, grain_smooth, ot_smooth;
+    ParamSmoother alpha_smooth, grain_smooth, ot_smooth, gain_smoother;
+
+    // I/O rings for STFT
+    std::vector<double> inring{std::vector<double>(4096, 0.0)};
+    int in_wr{0};
+    std::vector<double> olaring{std::vector<double>(4096, 0.0)};
+    int ola_rd{0}, ola_wr{0};
 
     // grain scheduling
     int    grain_count {0};
