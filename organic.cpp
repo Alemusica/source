@@ -375,7 +375,7 @@ public:
     attribute<symbol> mode { this, "mode", "core", description { "core = time-domain; smr = spectral match & residue." } };
 
     // --------- Core
-    attribute<number> mix { this, "mix", 0.5, description { "0=dry, 1=wet." }, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> mix { this, "mix", 0.5, description { "0=core, 1=SMR cloud." }, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> color { this, "color", 0.5, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> fbm_depth { this, "fbm_depth", 0.25, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> ou_rate { this, "ou_rate", 2.0, range {0.01,20.0}, setter { MIN_FUNCTION {
@@ -737,7 +737,9 @@ public:
             }
 
             // Blend dry/wet globale
-            double y = mix_lin(x, (use_smr)?wet_smr:wet_core, clamp01((double)mix));
+            // "Dry" rappresenta il core time-domain (non l'input, che spesso è vuoto).
+            // Così @mix 0.0 mantiene comunque il rumore generato internamente.
+            double y = mix_lin(wet_core, (use_smr)?wet_smr:wet_core, clamp01((double)mix));
 
             // micro-FDN "nuvola" (mix basso)
             const double fdn_send = 0.08;
