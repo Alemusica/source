@@ -359,7 +359,7 @@ public:
     MIN_TAGS { "noise, spectral, asmr, emdr, ot, yin, fdn, dsp" };
     MIN_AUTHOR { "you" };
 
-    inlet<>  in1 { this, "signal in (mono)" };
+    inlet<>  in1 { this, "(signal) input", "signal" };
     outlet<> out1 { this, "left out", "signal" };
     outlet<> out2 { this, "right out", "signal" };
 
@@ -870,7 +870,7 @@ private:
     inline double pull_ola(){ double y = undenorm(olaring[ola_rd]); olaring[ola_rd] = 0.0; ola_rd = (ola_rd+1) % (int)olaring.size(); return y; }
 };
 
-MIN_EXTERNAL(organic_noise_tilde);
+MIN_EXTERNAL(organic_noise_tilde, "organic.noise~");
 
 /*
 README (inline)
