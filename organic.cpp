@@ -539,15 +539,20 @@ public:
 
     void operator()(audio_bundle in, audio_bundle out) {
         double* L = out.samples(0);
-        if (!L)
+        double* R = out.samples(1);
+
+        if (!L && !R)
             return;
 
-        double* R = out.samples(1);
+        if (!L)
+            L = R;
         if (!R)
             R = L;
 
         const double* in1p = in.samples(0);
-        const size_t vs = out.frame_count();
+        size_t vs = out.frame_count();
+        if (!vs)
+            vs = in.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
 
@@ -725,7 +730,7 @@ public:
             if(use_smr){
                 double wet = pull_ola();
                 if(!std::isfinite(wet)) wet = 0.0;
-                wet_smr = wet;
+                wet_smr = (std::fabs(wet) > 1e-12) ? wet : wet_core;
             }
 
             // Blend dry/wet globale
