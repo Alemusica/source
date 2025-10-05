@@ -10,6 +10,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <atomic>
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
 #include <atomic>
 #include <cstdint>
