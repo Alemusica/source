@@ -13,6 +13,7 @@
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
 #include <atomic>
 #include <cstdint>
+#include <thread>
 
 using namespace c74::min;
 
@@ -608,8 +609,12 @@ public:
 
                 // Safe to swap configs at frame boundary
                 if(config_dirty.load(std::memory_order_acquire)){
-                    std::swap(active_config, shadow_config);
-                    config_dirty.store(false, std::memory_order_release);
+                    bool expected = false;
+                    if(config_lock.compare_exchange_strong(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) {
+                        std::swap(active_config, shadow_config);
+                        config_dirty.store(false, std::memory_order_release);
+                        config_lock.store(false, std::memory_order_release);
+                    }
                 }
 
                 // Apply parameter smoothing
@@ -792,7 +797,12 @@ public:
 private:
     number propagate_config_change(number v) {
         if (m_sr > 0) {
-            shadow_config = active_config;
+            bool expected = false;
+            while(!config_lock.compare_exchange_weak(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) {
+                expected = false;
+                std::this_thread::yield();
+            }
+
             shadow_config.prepare(m_sr);
             shadow_config.yin.thresh = yin_thresh;
             shadow_config.yin.prepare(dft.N);
@@ -805,6 +815,7 @@ private:
             double rel_ms = 80.0;
             lim_rel_a = std::exp(-1.0 / (((rel_ms/1000.0)*m_sr) + 1e-9));
             config_dirty.store(true, std::memory_order_release);
+            config_lock.store(false, std::memory_order_release);
         }
         return v;
     }
@@ -859,6 +870,7 @@ private:
     };
 
     std::atomic<bool> config_dirty{false};
+    std::atomic<bool> config_lock{false};
     Config active_config;
     Config shadow_config;
     ParamSmoother alpha_smooth, grain_smooth, ot_smooth, gain_smoother;
