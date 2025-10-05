@@ -12,6 +12,7 @@
 #include <limits>
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
 #include <atomic>
+#include <cstdint>
 
 using namespace c74::min;
 
@@ -142,14 +143,14 @@ struct TinyDFT {
 
     TinyDFT(int n=128, int h=64):N(n),H(h){
         win.resize(N);
-        for(int n_=0;n_<N;n_++){
+        for(int n_=0;n_<N;++n_){
             double w = 0.5 - 0.5*std::cos(2.0*kPi*(double)n_/N);
             win[n_] = std::sqrt(w + 1e-12); // sqrt-Hann
         }
         // precompute twiddles
         coskn.resize(N*N); sinkn.resize(N*N);
         for(int k=0;k<N;k++){
-            for(int n_=0;n_<N;n_++){
+            for(int n_=0;n_<N;++n_){
                 double ang = 2.0*kPi*(double)k*(double)n_/(double)N;
                 coskn[k*N + n_] = std::cos(ang);
                 sinkn[k*N + n_] = std::sin(ang);
@@ -162,7 +163,7 @@ struct TinyDFT {
             double rk=0.0, ik=0.0;
             const double* cptr = &coskn[k*N];
             const double* sptr = &sinkn[k*N];
-            for(int n_=0;n_<N;n_){
+            for(int n_=0;n_<N;++n_){
                 double xn = x[n_] * win[n_];
                 rk += xn *  cptr[n_];    // cos(+)
                 ik -= xn *  sptr[n_];    // sin(-) per forward
@@ -172,7 +173,7 @@ struct TinyDFT {
     }
     inline void idft(const std::vector<double>& re, const std::vector<double>& im, std::vector<double>& y){
         const int Nloc = (int)win.size();
-        for(int n_=0;n_<Nloc;n_){
+        for(int n_=0;n_<Nloc;++n_){
             double s=0.0;
             for(int k=0;k<Nloc;k++){
                 // usa Nloc per coerenza future-proof con eventuali refactor
@@ -362,50 +363,99 @@ public:
     outlet<> out1 { this, "left out", "signal" };
     outlet<> out2 { this, "right out", "signal" };
 
+    atoms handle_attribute_setter(const atoms& args) {
+        if (!args.empty()) {
+            propagate_config_change((number)args[0]);
+        }
+        return args;
+    }
+
     // --------- Global mode
     attribute<symbol> mode { this, "mode", "core", description { "core = time-domain; smr = spectral match & residue." } };
 
     // --------- Core
-    attribute<number> mix { this, "mix", 0.5, description { "0=dry, 1=wet." } };
-    attribute<number> color { this, "color", 0.5, range {0.0,1.0} };
-    attribute<number> fbm_depth { this, "fbm_depth", 0.25, range {0.0,1.0} };
-    attribute<number> ou_rate { this, "ou_rate", 2.0, range {0.01,20.0} };
-    attribute<number> ou_sigma { this, "ou_sigma", 0.3, range {0.0,2.0} };
-    attribute<number> chaos { this, "chaos", 0.2, range {0.0,1.0} };
-    attribute<number> glitch_rate { this, "glitch_rate", 6.0, range {0.1,50.0} };
-    attribute<number> glitch_depth { this, "glitch_depth", 0.6, range {0.0,1.0} };
-    attribute<number> env_sense { this, "env_sense", 0.7, range {0.0,2.0} };
-    attribute<number> emdr_rate { this, "emdr_rate", 1.0, range {0.1,8.0} };
-    attribute<number> emdr_depth { this, "emdr_depth", 0.3, range {0.0,1.0} };
-    attribute<number> seed { this, "seed", 1337 };
+    attribute<number> mix { this, "mix", 0.5, description { "0=dry, 1=wet." }, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> color { this, "color", 0.5, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> fbm_depth { this, "fbm_depth", 0.25, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> ou_rate { this, "ou_rate", 2.0, range {0.01,20.0}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                ou.set(v, ou_sigma, m_sr);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
+    attribute<number> ou_sigma { this, "ou_sigma", 0.3, range {0.0,2.0}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                ou.set(ou_rate, v, m_sr);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
+    attribute<number> chaos { this, "chaos", 0.2, range {0.0,1.0}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                lmap.set_r(3.5 + v * 0.4);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
+    attribute<number> glitch_rate { this, "glitch_rate", 6.0, range {0.1,50.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> glitch_depth { this, "glitch_depth", 0.6, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> env_sense { this, "env_sense", 0.7, range {0.0,2.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> emdr_rate { this, "emdr_rate", 1.0, range {0.1,8.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> emdr_depth { this, "emdr_depth", 0.3, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> seed { this, "seed", 1337, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number nv = args[0];
+                auto v = static_cast<uint32_t>(static_cast<int>(nv));
+                rng.seed(v);
+                pink.reseed(v ^ 0x13579BDFu);
+                ou.reseed(v ^ 0xCAFEBABEu);
+                frac.setup(64, beta_1f, 8192, v ^ 0xA1B2C3D4u);
+                npp.setup(m_sr, v ^ 0xDEADBEEFu);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
 
     // --------- SMR Tingles
-    attribute<number> smr_alpha   { this, "smr_alpha", 0.55, range {0.0,1.0} };
-    attribute<number> grain_width { this, "grain_width", 6.0, range {1.0, 32.0} };
-    attribute<number> grain_rate  { this, "grain_rate", 40.0, range {5.0, 200.0} };
-    attribute<number> harmonicity { this, "harmonicity", 0.0, range {0.0, 0.03} };
-    attribute<number> gate_thresh { this, "gate_thresh", 0.15, range {0.0,1.0} };
-    attribute<number> phi_dither  { this, "phi_dither", 0.0042, range {0.0,0.05} };
+    attribute<number> smr_alpha   { this, "smr_alpha", 0.55, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> grain_width { this, "grain_width", 6.0, range {1.0, 32.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> grain_rate  { this, "grain_rate", 40.0, range {5.0, 200.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> harmonicity { this, "harmonicity", 0.0, range {0.0, 0.03}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> gate_thresh { this, "gate_thresh", 0.15, range {0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> phi_dither  { this, "phi_dither", 0.0042, range {0.0,0.05}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
 
     // --------- HARMONIA (benessere)
-    attribute<number> harmonia       { this, "harmonia", 1.0, range{0.0,1.0} };
-    attribute<number> breathe_rate   { this, "breathe_rate", 0.10, range{0.02,0.33} };
-    attribute<number> breathe_depth  { this, "breathe_depth", 0.6,  range{0.0,1.0} };
-    attribute<number> crossfeed      { this, "crossfeed", 0.12, range{0.0,0.5} };
-    attribute<number> cf_cutoff      { this, "cf_cutoff", 700.0, range{120.0,3000.0} };
-    attribute<number> tp_ceiling     { this, "tp_ceiling", -1.0, range{-3.0,-0.1} };
+    attribute<number> harmonia       { this, "harmonia", 1.0, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> breathe_rate   { this, "breathe_rate", 0.10, range{0.02,0.33}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> breathe_depth  { this, "breathe_depth", 0.6,  range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> crossfeed      { this, "crossfeed", 0.12, range{0.0,0.5}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> cf_cutoff      { this, "cf_cutoff", 700.0, range{120.0,3000.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> tp_ceiling     { this, "tp_ceiling", -1.0, range{-3.0,-0.1}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                tp_lin = std::pow(10.0, (double)v / 20.0);
+                lim_ga = 1.0;
+            }
+            return this->handle_attribute_setter(args);
+        } } };
 
     // --------- fGn/fBm (1/f^β)
-    attribute<number> beta_1f        { this, "beta", 1.0, range{0.0,2.5} };
-    attribute<number> beta_mix       { this, "beta_mix", 0.25, range{0.0,1.0} };
+    attribute<number> beta_1f        { this, "beta", 1.0, range{0.0,2.5}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                frac.setup(64, v, 8192, (uint32_t)seed ^ 0xA1B2C3D4u);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
+    attribute<number> beta_mix       { this, "beta_mix", 0.25, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
 
     // --------- Poisson/OT/YIN
-    attribute<number> poisson_base   { this, "poisson_base", 20.0, range{0.0,300.0} };
-    attribute<number> poisson_envamt { this, "poisson_envamt", 40.0, range{0.0,300.0} };
-    attribute<number> ot_enable      { this, "ot_enable", 1.0, range{0.0,1.0} };
-    attribute<number> ot_tau         { this, "ot_tau", 0.5, range{0.0,1.0} };
-    attribute<number> yin_enable     { this, "yin_enable", 1.0, range{0.0,1.0} };
-    attribute<number> yin_thresh     { this, "yin_thresh", 0.10, range{0.02,0.3} };
+    attribute<number> poisson_base   { this, "poisson_base", 20.0, range{0.0,300.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> poisson_envamt { this, "poisson_envamt", 40.0, range{0.0,300.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> ot_enable      { this, "ot_enable", 1.0, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> ot_tau         { this, "ot_tau", 0.5, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> yin_enable     { this, "yin_enable", 1.0, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> yin_thresh     { this, "yin_thresh", 0.10, range{0.02,0.3}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
 
     // preset
     message<> preset { this, "preset", "", MIN_FUNCTION {
@@ -485,25 +535,7 @@ public:
         return {};
     } };
 
-    organic_noise_tilde(){
-        auto setter = [this](number v){ return this->propagate_config_change(v); };
-
-        mix.set_setter(setter); color.set_setter(setter); fbm_depth.set_setter(setter);
-        ou_rate.set_setter(setter); ou_sigma.set_setter(setter); chaos.set_setter(setter);
-        glitch_rate.set_setter(setter); glitch_depth.set_setter(setter); env_sense.set_setter(setter);
-        emdr_rate.set_setter(setter); emdr_depth.set_setter(setter); seed.set_setter(setter);
-
-        smr_alpha.set_setter(setter); grain_width.set_setter(setter); grain_rate.set_setter(setter);
-        harmonicity.set_setter(setter); gate_thresh.set_setter(setter); phi_dither.set_setter(setter);
-
-        harmonia.set_setter(setter); breathe_rate.set_setter(setter); breathe_depth.set_setter(setter);
-        crossfeed.set_setter(setter); cf_cutoff.set_setter(setter); tp_ceiling.set_setter(setter);
-
-        beta_1f.set_setter(setter); beta_mix.set_setter(setter);
-        poisson_base.set_setter(setter); poisson_envamt.set_setter(setter);
-        ot_enable.set_setter(setter); ot_tau.set_setter(setter);
-        yin_enable.set_setter(setter); yin_thresh.set_setter(setter);
-    }
+    organic_noise_tilde() = default;
 
     void operator()(audio_bundle in, audio_bundle out) {
         const double* in1p = in.samples(0); double* L = out.samples(0); double* R = out.samples(1); auto vs = in.frame_count();
@@ -756,6 +788,10 @@ private:
             shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
             shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
             shadow_config.cf_lpR.set_lp(cf_cutoff, m_sr);
+            shadow_config.cf_hpL.set_lp(150.0, m_sr);
+            shadow_config.cf_hpR.set_lp(150.0, m_sr);
+            double rel_ms = 80.0;
+            lim_rel_a = std::exp(-1.0 / (((rel_ms/1000.0)*m_sr) + 1e-9));
             config_dirty.store(true, std::memory_order_release);
         }
         return v;
@@ -764,10 +800,10 @@ private:
     double m_sr {48000.0}; double inv_sr {1.0/48000.0};
 
     // modules
-    XorShift32 rng; PinkVoss pink; Brown brown; OU ou; EnvFollow env; OnePole tilt_filter; OnePole fbm_lps[3]; DCBlock dc; Logistic lmap;
+    XorShift32 rng; PinkVoss pink; Brown brown; OU ou; EnvFollow env; OnePole tilt_filter; OnePole fbm_lps[3]; DCBlock dc; Logistic lmap; FractionalColorNoise frac; NHPPoisson npp;
 
     // core state
-    double phase_emdr {0.0}; double lfo_glitch {0.0}; double gstate {0.0};
+    double phase_emdr {0.0}; double lfo_glitch {0.0}; double gstate {0.0}; double breathe_phase {0.0}; double tp_lin {1.0}; double lim_rel_a {0.0}; double lim_ga {1.0};
 
     // STFT/OLA
     TinyDFT dft {128,64};
