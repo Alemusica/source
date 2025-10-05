@@ -11,10 +11,11 @@
 #include <algorithm>
 #include <limits>
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
+#include <atomic>
 
 using namespace c74::min;
 
-static constexpr double PI  = 3.14159265358979323846;
+static constexpr double kPi  = 3.14159265358979323846;
 static constexpr double PHI = 1.6180339887498948482;
 
 //--------------------- Utility RNG ---------------------//
@@ -39,7 +40,7 @@ inline static double undenorm(double x){ return (std::fabs(x) < 1e-30) ? 0.0 : x
 
 //--------------------- Simple filters ---------------------//
 struct OnePole { double a{0.0}, b{1.0}, z{0.0};
-    void set_lp(double cutoff, double sr) { cutoff = std::max(0.1, cutoff); double p = std::exp(-2.0 * PI * cutoff / sr); a = 1.0 - p; b = p; }
+    void set_lp(double cutoff, double sr) { cutoff = std::max(0.1, cutoff); double p = std::exp(-2.0 * kPi * cutoff / sr); a = 1.0 - p; b = p; }
     inline double process(double x){ z = a*x + b*z; return z; }
 };
 
@@ -92,7 +93,7 @@ struct OU {
     inline void set(double thz, double sig, double srr){ theta=std::max(0.0001,thz); sigma=sig; sr=srr; }
     inline double process(){
         double dt=1.0/sr; double u1=std::max(1e-12,rng.next()); double u2=rng.next();
-        double g=std::sqrt(-2.0*std::log(u1))*std::cos(2*PI*u2);
+        double g=std::sqrt(-2.0*std::log(u1))*std::cos(2*kPi*u2);
         x += theta*(0.0-x)*dt + sigma*std::sqrt(dt)*g;
         if(x>1.5)x=1.5; if(x<-1.5)x=-1.5; return std::tanh(x);
     }
@@ -142,14 +143,14 @@ struct TinyDFT {
     TinyDFT(int n=128, int h=64):N(n),H(h){
         win.resize(N);
         for(int n_=0;n_<N;n_++){
-            double w = 0.5 - 0.5*std::cos(2.0*PI*(double)n_/N);
+            double w = 0.5 - 0.5*std::cos(2.0*kPi*(double)n_/N);
             win[n_] = std::sqrt(w + 1e-12); // sqrt-Hann
         }
         // precompute twiddles
         coskn.resize(N*N); sinkn.resize(N*N);
         for(int k=0;k<N;k++){
             for(int n_=0;n_<N;n_++){
-                double ang = 2.0*PI*(double)k*(double)n_/(double)N;
+                double ang = 2.0*kPi*(double)k*(double)n_/(double)N;
                 coskn[k*N + n_] = std::cos(ang);
                 sinkn[k*N + n_] = std::sin(ang);
             }
@@ -300,7 +301,7 @@ struct BiquadFilter {
     double b0{1.0},b1{0.0},b2{0.0},a1{0.0},a2{0.0};
     double x1{0.0},x2{0.0},y1{0.0},y2{0.0};
     void set_shelving(double fc, double gain_db, double sr) {
-        double w0 = 2.0*PI*fc/sr;
+        double w0 = 2.0*kPi*fc/sr;
         double A = std::pow(10.0, gain_db/40.0);
         double alpha = std::sin(w0)/2.0 * std::sqrt((A + 1.0/A)*(1.0/0.707 - 1.0) + 2.0);
         double two_sqrtA_alpha = 2.0*std::sqrt(A)*alpha;
@@ -484,41 +485,27 @@ public:
         return {};
     } };
 
-    // setters per derived
-    attribute<number>::setter lambda_setters = [this](number v){
-        if(m_sr>0){
-            shadow_config = active_config;  // Copy current
-            shadow_config.prepare(m_sr);    // Update shadow
-            shadow_config.yin.thresh = yin_thresh;
-            shadow_config.yin.prepare(dft.N);
-            shadow_config.ot.prepare(dft.N);
-            shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
-            shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
-            shadow_config.cf_lpR.set_lp(cf_cutoff, m_sr);
-            config_dirty = true;            // Signal swap needed
-        }
-        return v;
-    };
-
     organic_noise_tilde(){
-        mix.set_setter(lambda_setters); color.set_setter(lambda_setters); fbm_depth.set_setter(lambda_setters);
-        ou_rate.set_setter(lambda_setters); ou_sigma.set_setter(lambda_setters); chaos.set_setter(lambda_setters);
-        glitch_rate.set_setter(lambda_setters); glitch_depth.set_setter(lambda_setters); env_sense.set_setter(lambda_setters);
-        emdr_rate.set_setter(lambda_setters); emdr_depth.set_setter(lambda_setters); seed.set_setter(lambda_setters);
+        auto setter = [this](number v){ return this->propagate_config_change(v); };
 
-        smr_alpha.set_setter(lambda_setters); grain_width.set_setter(lambda_setters); grain_rate.set_setter(lambda_setters);
-        harmonicity.set_setter(lambda_setters); gate_thresh.set_setter(lambda_setters); phi_dither.set_setter(lambda_setters);
+        mix.set_setter(setter); color.set_setter(setter); fbm_depth.set_setter(setter);
+        ou_rate.set_setter(setter); ou_sigma.set_setter(setter); chaos.set_setter(setter);
+        glitch_rate.set_setter(setter); glitch_depth.set_setter(setter); env_sense.set_setter(setter);
+        emdr_rate.set_setter(setter); emdr_depth.set_setter(setter); seed.set_setter(setter);
 
-        harmonia.set_setter(lambda_setters); breathe_rate.set_setter(lambda_setters); breathe_depth.set_setter(lambda_setters);
-        crossfeed.set_setter(lambda_setters); cf_cutoff.set_setter(lambda_setters); tp_ceiling.set_setter(lambda_setters);
+        smr_alpha.set_setter(setter); grain_width.set_setter(setter); grain_rate.set_setter(setter);
+        harmonicity.set_setter(setter); gate_thresh.set_setter(setter); phi_dither.set_setter(setter);
 
-        beta_1f.set_setter(lambda_setters); beta_mix.set_setter(lambda_setters);
-        poisson_base.set_setter(lambda_setters); poisson_envamt.set_setter(lambda_setters);
-        ot_enable.set_setter(lambda_setters); ot_tau.set_setter(lambda_setters);
-        yin_enable.set_setter(lambda_setters); yin_thresh.set_setter(lambda_setters);
+        harmonia.set_setter(setter); breathe_rate.set_setter(setter); breathe_depth.set_setter(setter);
+        crossfeed.set_setter(setter); cf_cutoff.set_setter(setter); tp_ceiling.set_setter(setter);
+
+        beta_1f.set_setter(setter); beta_mix.set_setter(setter);
+        poisson_base.set_setter(setter); poisson_envamt.set_setter(setter);
+        ot_enable.set_setter(setter); ot_tau.set_setter(setter);
+        yin_enable.set_setter(setter); yin_thresh.set_setter(setter);
     }
 
-    void operator()(audio_bundle_input& in, audio_bundle_output& out) {
+    void operator()(audio_bundle in, audio_bundle out) {
         const double* in1p = in.samples(0); double* L = out.samples(0); double* R = out.samples(1); auto vs = in.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
@@ -532,7 +519,7 @@ public:
             // ---------- Respirazione HARMONIA ----------
             breathe_phase += std::max(0.0001, (double)breathe_rate) * inv_sr;
             if(breathe_phase>=1.0) breathe_phase-=1.0;
-            const double breath = 0.5 - 0.5*std::cos(2.0*PI*breathe_phase); // [0..1]
+            const double breath = 0.5 - 0.5*std::cos(2.0*kPi*breathe_phase); // [0..1]
             const double d_breath = (double)breathe_depth;
 
             // ---------- CORE time-domain ----------
@@ -759,6 +746,20 @@ public:
     }
 
 private:
+    number propagate_config_change(number v) {
+        if (m_sr > 0) {
+            shadow_config = active_config;
+            shadow_config.prepare(m_sr);
+            shadow_config.yin.thresh = yin_thresh;
+            shadow_config.yin.prepare(dft.N);
+            shadow_config.ot.prepare(dft.N);
+            shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
+            shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
+            shadow_config.cf_lpR.set_lp(cf_cutoff, m_sr);
+            config_dirty.store(true, std::memory_order_release);
+        }
+        return v;
+    }
     // state
     double m_sr {48000.0}; double inv_sr {1.0/48000.0};
 
