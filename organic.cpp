@@ -13,7 +13,7 @@
 #include <cassert>   // per assert di sviluppo (disabilitato in release con NDEBUG)
 #include <atomic>
 #include <cstdint>
-#include <thread>
+// no threads/locks nel callback audio (RT-safe)
 
 using namespace c74::min;
 
@@ -364,12 +364,7 @@ public:
     outlet<> out1 { this, "left out", "signal" };
     outlet<> out2 { this, "right out", "signal" };
 
-    atoms handle_attribute_setter(const atoms& args) {
-        if (!args.empty()) {
-            propagate_config_change((number)args[0]);
-        }
-        return args;
-    }
+    atoms handle_attribute_setter(const atoms& args) { return args; }
 
     // --------- Global mode
     attribute<symbol> mode { this, "mode", "core", description { "core = time-domain; smr = spectral match & residue." } };
@@ -430,7 +425,16 @@ public:
     attribute<number> breathe_rate   { this, "breathe_rate", 0.10, range{0.02,0.33}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> breathe_depth  { this, "breathe_depth", 0.6,  range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> crossfeed      { this, "crossfeed", 0.12, range{0.0,0.5}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
-    attribute<number> cf_cutoff      { this, "cf_cutoff", 700.0, range{120.0,3000.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> cf_cutoff      { this, "cf_cutoff", 700.0, range{120.0,3000.0}, setter { MIN_FUNCTION {
+            if (!args.empty() && m_sr > 0) {
+                number fc = args[0];
+                active_config.cf_lpL.set_lp(fc, m_sr);
+                active_config.cf_lpR.set_lp(fc, m_sr);
+                shadow_config.cf_lpL.set_lp(fc, m_sr);
+                shadow_config.cf_lpR.set_lp(fc, m_sr);
+            }
+            return this->handle_attribute_setter(args);
+        } } };
     attribute<number> tp_ceiling     { this, "tp_ceiling", -1.0, range{-3.0,-0.1}, setter { MIN_FUNCTION {
             if (!args.empty()) {
                 number v = args[0];
@@ -456,7 +460,14 @@ public:
     attribute<number> ot_enable      { this, "ot_enable", 1.0, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> ot_tau         { this, "ot_tau", 0.5, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
     attribute<number> yin_enable     { this, "yin_enable", 1.0, range{0.0,1.0}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
-    attribute<number> yin_thresh     { this, "yin_thresh", 0.10, range{0.02,0.3}, setter { MIN_FUNCTION { return this->handle_attribute_setter(args); } } };
+    attribute<number> yin_thresh     { this, "yin_thresh", 0.10, range{0.02,0.3}, setter { MIN_FUNCTION {
+            if (!args.empty()) {
+                number v = args[0];
+                active_config.yin.thresh = v;
+                shadow_config.yin.thresh = v;
+            }
+            return this->handle_attribute_setter(args);
+        } } };
 
     // preset
     message<> preset { this, "preset", "", MIN_FUNCTION {
@@ -552,12 +563,13 @@ public:
             R = L;
 
         const double* in1p = in.samples(0);
-        const size_t vs = in.frame_count();
+        const bool has_in = in1.has_signal_connection();
+        const size_t vs = out.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
 
         for(size_t i=0;i<vs;i++){
-            const double x = in1p ? in1p[i] : 0.0; // mono input
+            const double x = (in1p && has_in) ? in1p[i] : 0.0; // mono input
 
             // Envelope
             const double e = env.process(x) * env_sense;
@@ -610,12 +622,8 @@ public:
 
                 // Safe to swap configs at frame boundary
                 if(config_dirty.load(std::memory_order_acquire)){
-                    bool expected = false;
-                    if(config_lock.compare_exchange_strong(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) {
-                        std::swap(active_config, shadow_config);
-                        config_dirty.store(false, std::memory_order_release);
-                        config_lock.store(false, std::memory_order_release);
-                    }
+                    std::swap(active_config, shadow_config);
+                    config_dirty.store(false, std::memory_order_release);
                 }
 
                 // Apply parameter smoothing
@@ -642,7 +650,7 @@ public:
                 double f0_bin = 2.0;
                 if (yin_enable > 0.5) {
                     // Use longer window for YIN
-                    dft.copy_long_window(inring, in_wr, active_config.yin_long_win, 2); // Stride=2 for basic decimation
+                    dft.copy_long_window(inring, in_wr, active_config.yin_long_win, 1); // Stride pieno per stabilità
                     double mean = 0.0;
                     for(double v : active_config.yin_long_win) mean += v;
                     mean /= (double)active_config.yin_long_win.size();
@@ -745,37 +753,43 @@ public:
                 smr_peak_hold *= 0.9995;
             }
 
-            // Blend dry/wet globale
-            // "Dry" rappresenta il core time-domain (non l'input, che spesso è vuoto).
-            // Così @mix 0.0 mantiene comunque il rumore generato internamente.
-            double y = mix_lin(wet_core, (use_smr)?wet_smr:wet_core, clamp01((double)mix));
+            double wet = (use_smr ? wet_smr : wet_core);
+            const double mix_v = clamp01((double)mix);
+            double y = has_in ? mix_lin(x, wet, mix_v) : wet;
 
-            // micro-FDN "nuvola" (mix basso)
-            const double fdn_send = 0.08;
-            double y_fdn = active_config.fdn.tick(y);
-            y = mix_lin(y, y_fdn, fdn_send);
-
-            // EMDR L/R (range rilassante, senza scrivere attributi in audio thread)
+            // EMDR state update (sempre fluido)
             const double emdr_rate_l = std::min(1.4, std::max(0.8, (double)emdr_rate));
             const double emdr_depth_l = std::min(0.35, (double)emdr_depth);
-            phase_emdr += (emdr_rate_l * inv_sr); if(phase_emdr>=1.0) phase_emdr-=1.0; double hemi = (phase_emdr<0.5)?1.0:-1.0;
+            phase_emdr += (emdr_rate_l * inv_sr);
+            if(phase_emdr>=1.0) phase_emdr-=1.0;
+            double hemi = (phase_emdr<0.5)?1.0:-1.0;
             double gL = 1.0 - emdr_depth_l * ((hemi<0)?1.0:0.0);
             double gR = 1.0 - emdr_depth_l * ((hemi>0)?1.0:0.0);
 
-            double yl = y * gL;
-            double yr = y * gR;
+            double yl = y;
+            double yr = y;
 
-            // Crossfeed cuffie (lowpass opposto)
-            if (cf_v > 0.0001) {
-                double cf = clamp01(cf_v);
-                // HP the direct path (via LP subtraction)
-                yl = yl - active_config.cf_hpL.process(yl);
-                yr = yr - active_config.cf_hpR.process(yr);
-                // LP the crossed path
-                double addL = active_config.cf_lpR.process(yr);
-                double addR = active_config.cf_lpL.process(yl);
-                yl = yl + cf * addL * 0.5;
-                yr = yr + cf * addR * 0.5;
+            if (!has_in || mix_v > 0.0) {
+                // micro-FDN "nuvola" (solo quando esiste componente wet)
+                const double fdn_send = 0.08;
+                double y_fdn = active_config.fdn.tick(y);
+                y = mix_lin(y, y_fdn, fdn_send);
+
+                yl = y * gL;
+                yr = y * gR;
+
+                // Crossfeed cuffie (lowpass opposto)
+                if (cf_v > 0.0001) {
+                    double cf = clamp01(cf_v);
+                    // HP the direct path (via LP subtraction)
+                    yl = yl - active_config.cf_hpL.process(yl);
+                    yr = yr - active_config.cf_hpR.process(yr);
+                    // LP the crossed path
+                    double addL = active_config.cf_lpR.process(yr);
+                    double addR = active_config.cf_lpL.process(yl);
+                    yl = yl + cf * addL * 0.5;
+                    yr = yr + cf * addR * 0.5;
+                }
             }
 
             // Soft true‑peak ceiling approx (thread-safe; fast-attack + soft release)
@@ -786,7 +800,7 @@ public:
 
                 const double over = a - tp_lin;
                 const double g = 1.0 / (1.0 + 4.0*over);
-                lim_ga = std::min(lim_ga, g);
+                lim_ga = std::max(0.05, std::min(lim_ga, g));
                 lim_ga = lim_ga * lim_rel_a + g * (1.0 - lim_rel_a);
 
                 auto apply = [&](double s) {
@@ -808,12 +822,7 @@ public:
 private:
     number propagate_config_change(number v) {
         if (m_sr > 0) {
-            bool expected = false;
-            while(!config_lock.compare_exchange_weak(expected, true, std::memory_order_acquire, std::memory_order_relaxed)) {
-                expected = false;
-                std::this_thread::yield();
-            }
-
+            shadow_config = active_config;
             shadow_config.prepare(m_sr);
             shadow_config.yin.thresh = yin_thresh;
             shadow_config.yin.prepare(dft.N);
@@ -826,7 +835,6 @@ private:
             double rel_ms = 80.0;
             lim_rel_a = std::exp(-1.0 / (((rel_ms/1000.0)*m_sr) + 1e-9));
             config_dirty.store(true, std::memory_order_release);
-            config_lock.store(false, std::memory_order_release);
         }
         return v;
     }
@@ -882,7 +890,6 @@ private:
     };
 
     std::atomic<bool> config_dirty{false};
-    std::atomic<bool> config_lock{false};
     Config active_config;
     Config shadow_config;
     ParamSmoother alpha_smooth, grain_smooth, ot_smooth, gain_smoother;
