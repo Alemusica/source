@@ -538,7 +538,16 @@ public:
     organic_noise_tilde() = default;
 
     void operator()(audio_bundle in, audio_bundle out) {
-        const double* in1p = in.samples(0); double* L = out.samples(0); double* R = out.samples(1); auto vs = in.frame_count();
+        double* L = out.samples(0);
+        if (!L)
+            return;
+
+        double* R = out.samples(1);
+        if (!R)
+            R = L;
+
+        const double* in1p = in.samples(0);
+        const size_t vs = out.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
 
