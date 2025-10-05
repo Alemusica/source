@@ -550,9 +550,7 @@ public:
             R = L;
 
         const double* in1p = in.samples(0);
-        size_t vs = out.frame_count();
-        if (!vs)
-            vs = in.frame_count();
+        const size_t vs = in.frame_count();
         const bool  use_smr = (mode == symbol{"smr"});
         const double cf_v   = (double)crossfeed;
 
