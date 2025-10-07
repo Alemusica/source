@@ -780,15 +780,24 @@ public:
 
                 // Crossfeed cuffie (lowpass opposto)
                 if (cf_v > 0.0001) {
-                    double cf = clamp01(cf_v);
-                    // HP the direct path (via LP subtraction)
-                    yl = yl - active_config.cf_hpL.process(yl);
-                    yr = yr - active_config.cf_hpR.process(yr);
-                    // LP the crossed path
-                    double addL = active_config.cf_lpR.process(yr);
-                    double addR = active_config.cf_lpL.process(yl);
-                    yl = yl + cf * addL * 0.5;
-                    yr = yr + cf * addR * 0.5;
+                    const double cf = clamp01(cf_v);
+
+                    // Conserva i percorsi diretti prima del filtraggio
+                    const double directL = yl;
+                    const double directR = yr;
+
+                    // HP sul percorso diretto (calcolato via sottrazione della LP)
+                    const double lpL = active_config.cf_hpL.process(directL);
+                    const double lpR = active_config.cf_hpR.process(directR);
+                    const double hpL = directL - lpL;
+                    const double hpR = directR - lpR;
+
+                    // LP del percorso incrociato usando i segnali diretti originali
+                    const double crossL = active_config.cf_lpR.process(directR);
+                    const double crossR = active_config.cf_lpL.process(directL);
+
+                    yl = hpL + cf * crossL * 0.5;
+                    yr = hpR + cf * crossR * 0.5;
                 }
             }
 
