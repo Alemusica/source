@@ -514,8 +514,8 @@ public:
 
         active_config.yin.thresh = yin_thresh;
         shadow_config.yin.thresh = yin_thresh;
-        active_config.yin.prepare(dft.N);
-        shadow_config.yin.prepare(dft.N);
+        active_config.yin.prepare((int)active_config.yin_long_win.size());
+        shadow_config.yin.prepare((int)shadow_config.yin_long_win.size());
 
         active_config.ot.prepare(dft.N);
         shadow_config.ot.prepare(dft.N);
@@ -637,8 +637,13 @@ public:
                 // DFT
                 dft.dft(active_config.winbuf, active_config.re, active_config.im);
                 for(int k=0;k<dft.N;k++){
-                    active_config.mag[k]=std::hypot(active_config.re[k], active_config.im[k]);
-                    active_config.phase[k]=std::atan2(active_config.im[k], active_config.re[k]);
+                    double re = active_config.re[k];
+                    double im = active_config.im[k];
+                    double mag = std::hypot(re, im);
+                    double invmag = (mag > 1e-12) ? (1.0 / mag) : 0.0;
+                    active_config.mag[k] = mag;
+                    active_config.unit_re[k] = re * invmag;
+                    active_config.unit_im[k] = im * invmag;
                 }
 
                 // α modulato dal respiro
@@ -650,7 +655,7 @@ public:
                 double f0_bin = 2.0;
                 if (yin_enable > 0.5) {
                     // Use longer window for YIN
-                    dft.copy_long_window(inring, in_wr, active_config.yin_long_win, 1); // Stride pieno per stabilità
+                    dft.copy_long_window(inring, in_wr, active_config.yin_long_win, 1); // stride pieno (nessuna decimazione)
                     double mean = 0.0;
                     for(double v : active_config.yin_long_win) mean += v;
                     mean /= (double)active_config.yin_long_win.size();
@@ -658,7 +663,7 @@ public:
                         active_config.xw[n] = active_config.yin_long_win[n] - mean;
                     double tau = active_config.yin.estimate_tau(active_config.xw);
                     if (!(tau >= 2.0 && tau < active_config.yin_long_win.size()/2)) tau = 2.0;
-                    f0_bin = ((double)dft.N * m_sr) / (tau * 2.0 * 48000.0); // Adjust for decimation
+                    f0_bin = (double)dft.N / std::max(2.0, tau); // k = N/τ (nessuna decimazione)
                 } else {
                     int kmax=2; double vmax=0.0; for(int k=2;k<dft.N/8;k++){ if(active_config.mag[k]>vmax){ vmax=active_config.mag[k]; kmax=k; } } f0_bin = std::max(2, kmax);
                 }
@@ -685,8 +690,10 @@ public:
                     for(int k=k0;k<=k1;k++){
                         double w = std::exp(-0.5 * ((k-center)*(k-center)) / (sigma*sigma));
                         double m = amp * w;
-                        active_config.gr_re[k] += m * std::cos(active_config.phase[k]);
-                        active_config.gr_im[k] += m * std::sin(active_config.phase[k]);
+                        double u_re = active_config.unit_re[k];
+                        double u_im = active_config.unit_im[k];
+                        active_config.gr_re[k] += m * u_re;
+                        active_config.gr_im[k] += m * u_im;
                     }
                 }
                 need_reloc = false;
@@ -717,10 +724,8 @@ public:
                                                      active_config.B, clamp01((double)local_ot_tau));
 
                     for(int k=0; k<dft.N; k++) {
-                        double r2 = active_config.re[k]*active_config.re[k] + active_config.im[k]*active_config.im[k];
-                        double invmag = (r2 > 1e-24) ? 1.0/std::sqrt(r2) : 0.0;
-                        double u_re = active_config.re[k] * invmag;
-                        double u_im = active_config.im[k] * invmag;
+                        double u_re = active_config.unit_re[k];
+                        double u_im = active_config.unit_im[k];
                         double mB   = S * active_config.B[k];
                         active_config.gr_re[k] = mB * u_re;
                         active_config.gr_im[k] = mB * u_im;
@@ -825,7 +830,7 @@ private:
             shadow_config = active_config;
             shadow_config.prepare(m_sr);
             shadow_config.yin.thresh = yin_thresh;
-            shadow_config.yin.prepare(dft.N);
+            shadow_config.yin.prepare((int)shadow_config.yin_long_win.size());
             shadow_config.ot.prepare(dft.N);
             shadow_config.fdn.setup(m_sr, 29.7, 37.1, 41.3, 43.9, 0.6);
             shadow_config.cf_lpL.set_lp(cf_cutoff, m_sr);
@@ -856,7 +861,8 @@ private:
     // Config
     struct Config {
         std::vector<double> yin_long_win{std::vector<double>(384, 0.0)};
-        std::vector<double> winbuf, re, im, yframe, mag, phase;
+        std::vector<double> winbuf, re, im, yframe, mag;
+        std::vector<double> unit_re, unit_im;
         std::vector<double> gr_re, gr_im;
         std::vector<double> xw, Xmag, Gmag, B;
         OnePole cf_lpL, cf_lpR;
@@ -877,13 +883,14 @@ private:
             winbuf.assign(N,0.0);
             re.assign(N,0.0); im.assign(N,0.0);
             yframe.assign(N,0.0);
-            mag.assign(N,0.0); phase.assign(N,0.0);
+            mag.assign(N,0.0);
+            unit_re.assign(N,0.0); unit_im.assign(N,0.0);
             gr_re.assign(N,0.0); gr_im.assign(N,0.0);
             xw.resize(yin_long_win.size());
             Xmag.resize(N); Gmag.resize(N); B.resize(N);
-            
+
             // Setup components
-            yin.prepare(N);
+            yin.prepare((int)yin_long_win.size());
             ot.prepare(N);
             fdn.setup(sr);
         }
